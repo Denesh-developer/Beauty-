@@ -185,7 +185,7 @@
   </div>
 </div>
 
-<p class="hint">Works best in good lighting, face turned toward the camera. Built with MediaPipe Face Mesh — all processing happens locally in your browser, nothing is uploaded anywhere.</p>
+<p class="hint">Works best in good lighting, face turned toward the camera. Colors are multiply-blended and feathered onto your real skin tone for a natural look. Built with MediaPipe Face Mesh — all processing happens locally in your browser, nothing is uploaded anywhere.</p>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
@@ -206,17 +206,17 @@ const FACE_OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,37
 
 // ---------- Shade palettes ----------
 const LIP_SHADES = [
-  { name: 'Red',    color: 'rgba(178,0,20,0.7)' },
-  { name: 'Pink',   color: 'rgba(214,60,120,0.65)' },
-  { name: 'Nude',   color: 'rgba(170,110,95,0.65)' },
-  { name: 'Maroon', color: 'rgba(90,15,35,0.75)' },
-  { name: 'Coral',  color: 'rgba(224,100,80,0.65)' },
+  { name: 'Red',    color: 'rgba(178,0,20,1)',  alpha: 0.6, gloss: 0.22 },
+  { name: 'Pink',   color: 'rgba(214,60,120,1)', alpha: 0.55, gloss: 0.25 },
+  { name: 'Nude',   color: 'rgba(170,110,95,1)', alpha: 0.5,  gloss: 0.2 },
+  { name: 'Maroon', color: 'rgba(90,15,35,1)',   alpha: 0.65, gloss: 0.18 },
+  { name: 'Coral',  color: 'rgba(224,100,80,1)', alpha: 0.55, gloss: 0.24 },
 ];
 const EYE_SHADES = [
-  { name: 'Rose',   color: 'rgba(200,120,140,0.35)' },
-  { name: 'Brown',  color: 'rgba(120,80,60,0.4)' },
-  { name: 'Smoky',  color: 'rgba(60,60,70,0.42)' },
-  { name: 'Gold',   color: 'rgba(200,160,80,0.32)' },
+  { name: 'Rose',   color: 'rgba(200,120,140,1)', alpha: 0.32 },
+  { name: 'Brown',  color: 'rgba(120,80,60,1)',   alpha: 0.38 },
+  { name: 'Smoky',  color: 'rgba(60,60,70,1)',    alpha: 0.4 },
+  { name: 'Gold',   color: 'rgba(200,160,80,1)',  alpha: 0.3 },
 ];
 
 let activeLip = 0;
@@ -275,6 +275,28 @@ function pathFrom(landmarks, indices, w, h) {
   return path;
 }
 
+// offscreen layer used to feather/blur any mask before compositing onto main canvas
+const layerCanvas = document.createElement('canvas');
+const layerCtx = layerCanvas.getContext('2d');
+
+// Draws `drawPathFn` into a blurred offscreen layer, then composites it onto
+// the main canvas using a realistic blend mode (multiply/soft-light) so the
+// original skin shading/highlights show through instead of a flat color fill.
+function paintFeatheredLayer(w, h, drawPathFn, fillStyle, blendMode, alpha, feather) {
+  layerCanvas.width = w; layerCanvas.height = h;
+  layerCtx.clearRect(0, 0, w, h);
+  layerCtx.filter = feather ? `blur(${feather}px)` : 'none';
+  layerCtx.fillStyle = fillStyle;
+  drawPathFn(layerCtx);
+  layerCtx.filter = 'none';
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.globalCompositeOperation = blendMode;
+  ctx.drawImage(layerCanvas, 0, 0);
+  ctx.restore();
+}
+
 function avgPoint(landmarks, indices, w, h) {
   let sx = 0, sy = 0;
   indices.forEach(i => { sx += landmarks[i].x * w; sy += landmarks[i].y * h; });
@@ -282,23 +304,43 @@ function avgPoint(landmarks, indices, w, h) {
 }
 
 function drawFoundation(landmarks, w, h) {
+  // skin-smoothed layer: blur the live frame for a soft-focus skin texture
   blurCanvas.width = w; blurCanvas.height = h;
-  blurCtx.filter = 'blur(6px)';
+  blurCtx.filter = 'blur(5px)';
   blurCtx.drawImage(video, 0, 0, w, h);
   blurCtx.filter = 'none';
 
-  ctx.save();
+  // feathered face mask so the smoothing fades at the jawline/hairline
+  // instead of stopping at a hard oval edge
+  layerCanvas.width = w; layerCanvas.height = h;
+  layerCtx.clearRect(0, 0, w, h);
+  layerCtx.filter = 'blur(8px)';
+  layerCtx.fillStyle = '#fff';
   const facePath = pathFrom(landmarks, FACE_OVAL, w, h);
-  ctx.clip(facePath);
-  ctx.globalAlpha = 0.55;
-  ctx.drawImage(blurCanvas, 0, 0);
+  layerCtx.fill(facePath);
+  layerCtx.filter = 'none';
+
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  // use the feathered mask as an alpha clip via a temp composite
+  const maskedSkin = document.createElement('canvas');
+  maskedSkin.width = w; maskedSkin.height = h;
+  const mctx = maskedSkin.getContext('2d');
+  mctx.drawImage(blurCanvas, 0, 0);
+  mctx.globalCompositeOperation = 'destination-in';
+  mctx.drawImage(layerCanvas, 0, 0);
+  ctx.drawImage(maskedSkin, 0, 0);
   ctx.globalAlpha = 1;
-  ctx.fillStyle = 'rgba(200,160,150,0.08)';
+  ctx.restore();
+
+  ctx.save();
+  ctx.clip(facePath);
+  ctx.fillStyle = 'rgba(200,160,150,0.06)';
   ctx.fill(facePath);
   ctx.restore();
 }
 
-function drawEyeshadowBand(landmarks, arcIndices, browIndices, w, h, color) {
+function drawEyeshadowBand(landmarks, arcIndices, browIndices, w, h, color, alpha) {
   const eyeCenter = avgPoint(landmarks, arcIndices, w, h);
   const browCenter = avgPoint(landmarks, browIndices, w, h);
   const ux = browCenter[0] - eyeCenter[0];
@@ -311,261 +353,62 @@ function drawEyeshadowBand(landmarks, arcIndices, browIndices, w, h, color) {
   const inner = arcIndices.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
   const outer = inner.map(p => [p[0] + nx, p[1] + ny]);
 
-  const path = new Path2D();
-  path.moveTo(inner[0][0], inner[0][1]);
-  for (let i = 1; i < inner.length; i++) path.lineTo(inner[i][0], inner[i][1]);
-  for (let i = outer.length - 1; i >= 0; i--) path.lineTo(outer[i][0], outer[i][1]);
-  path.closePath();
-
-  ctx.fillStyle = color;
-  ctx.fill(path);
+  paintFeatheredLayer(w, h, (c) => {
+    c.beginPath();
+    c.moveTo(inner[0][0], inner[0][1]);
+    for (let i = 1; i < inner.length; i++) c.lineTo(inner[i][0], inner[i][1]);
+    for (let i = outer.length - 1; i >= 0; i--) c.lineTo(outer[i][0], outer[i][1]);
+    c.closePath();
+    c.fill();
+  }, color, 'multiply', alpha, Math.max(3, mag * 0.12));
 }
 
 function drawEyeliner(landmarks, arcIndices, w, h) {
   const pts = arcIndices.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
-  ctx.beginPath();
-  ctx.moveTo(pts[0][0], pts[0][1]);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
   const last = pts[pts.length - 1];
   const prev = pts[pts.length - 2];
   const dx = last[0] - prev[0], dy = last[1] - prev[1];
-  ctx.lineTo(last[0] + dx * 1.8, last[1] + dy * 1.8);
-  ctx.strokeStyle = 'rgba(10,8,8,0.95)';
-  ctx.lineWidth = Math.max(3, w * 0.01);
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-  ctx.stroke();
-}
+  const wingX = last[0] + dx * 1.8, wingY = last[1] + dy * 1.8;
 
-function drawBrow(landmarks, indices, w, h) {
-  const path = pathFrom(landmarks, indices, w, h);
-  ctx.fillStyle = 'rgba(55,35,25,0.38)';
-  ctx.fill(path);
-}
-
-function onResults(results) {
-  const w = canvas.width, h = canvas.height;
-  ctx.save();
-  ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(results.image, 0, 0, w, h);
-
-  if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-    const landmarks = results.multiFaceLandmarks[0];
-    statusText.textContent = 'Face detected';
-    statusDot.classList.add('live');
-
-    if (state.foundation) drawFoundation(landmarks, w, h);
-
-    if (state.blush) {
-      const radius = w * 0.032;
-      [LEFT_CHEEK, RIGHT_CHEEK].forEach(idx => {
-        const cx = landmarks[idx].x * w, cy = landmarks[idx].y * h;
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
-        grad.addColorStop(0, 'rgba(214,110,140,0.22)');
-        grad.addColorStop(1, 'rgba(214,110,140,0)');
-        ctx.fillStyle = grad;
-        ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill();
-      });
-    }
-
-    if (state.brow) {
-      drawBrow(landmarks, LEFT_EYEBROW, w, h);
-      drawBrow(landmarks, RIGHT_EYEBROW, w, h);
-    }
-
-    if (state.eyeshadow) {
-      const c = EYE_SHADES[activeEye].color;
-      drawEyeshadowBand(landmarks, LEFT_EYE_UPPER_ARC, LEFT_EYEBROW, w, h, c);
-      drawEyeshadowBand(landmarks, RIGHT_EYE_UPPER_ARC, RIGHT_EYEBROW, w, h, c);
-    }
-
-    if (state.eyeliner) {
-      drawEyeliner(landmarks, LEFT_EYE_UPPER_ARC, w, h);
-      drawEyeliner(landmarks, RIGHT_EYE_UPPER_ARC, w, h);
-    }
-
-    ctx.save();
-    const outer = pathFrom(landmarks, LIPS_OUTER, w, h);
-    const inner = pathFrom(landmarks, LIPS_INNER, w, h);
-    ctx.clip(outer);
-    ctx.fillStyle = LIP_SHADES[activeLip].color;
-    ctx.fill(outer);
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.fillStyle = 'rgba(0,0,0,1)';
-    ctx.fill(inner);
-    ctx.restore();
-
-  } else {
-    statusText.textContent = 'No face detected';
-    statusDot.classList.remove('live');
+  // soft base stroke (feathered) for a natural blended line, then a crisp
+  // thin core on top so it still reads sharply up close
+  const baseW = Math.max(2.5, w * 0.007);
+  function tracePath(c) {
+    c.beginPath();
+    c.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
+    c.lineTo(wingX, wingY);
+    c.lineJoin = 'round';
+    c.lineCap = 'round';
+    c.stroke();
   }
 
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = 0.5;
+  ctx.strokeStyle = 'rgba(20,14,14,1)';
+  ctx.lineWidth = baseW * 2.2;
+  ctx.filter = 'blur(1.2px)';
+  tracePath(ctx);
+  ctx.filter = 'none';
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(15,10,10,0.9)';
+  ctx.lineWidth = baseW;
+  tracePath(ctx);
   ctx.restore();
 }
 
-const faceMesh = new FaceMesh({
-  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
-});
-faceMesh.setOptions({
-  maxNumFaces: 1,
-  refineLandmarks: true,
-  minDetectionConfidence: 0.5,
-  minTrackingConfidence: 0.5
-});
-faceMesh.onResults(onResults);
-
-let camera = null;
-
-async function startCamera() {
-  statusText.textContent = 'Requesting camera access…';
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-    video.srcObject = stream;
-    await video.play();
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-
-    camera = new Camera(video, {
-      onFrame: async () => { await faceMesh.send({ image: video }); },
-      width: canvas.width,
-      height: canvas.height
-    });
-    camera.start();
-    startBtn.textContent = 'Camera running';
-    startBtn.disabled = true;
-  } catch (err) {
-    statusText.textContent = 'Camera access denied or unavailable';
-    console.error(err);
-  }
-}
-
-startBtn.addEventListener('click', startCamera);
-
-snapBtn.addEventListener('click', () => {
-  const link = document.createElement('a');
-  link.download = 'makeup-tryon.png';
-  link.href = canvas.toDataURL('image/png');
-  link.click();
-});
-</script>
-</body>
-const video = document.getElementById('video');
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const statusDot = document.getElementById('statusDot');
-const statusText = document.getElementById('statusText');
-const startBtn = document.getElementById('startBtn');
-const snapBtn = document.getElementById('snapBtn');
-const lipShadesEl = document.getElementById('lipShades');
-const eyeShadesEl = document.getElementById('eyeShades');
-
-// blur helper canvas
-const blurCanvas = document.createElement('canvas');
-const blurCtx = blurCanvas.getContext('2d');
-
-function buildShadeRow(container, palette, onPick, defaultActive) {
-  palette.forEach((s, i) => {
-    const dot = document.createElement('div');
-    dot.className = 'shade' + (i === defaultActive ? ' active' : '');
-    dot.style.background = s.color.replace(/[\d.]+\)$/g, '1)');
-    dot.title = s.name;
-    dot.addEventListener('click', () => {
-      onPick(i);
-      container.querySelectorAll('.shade').forEach(el => el.classList.remove('active'));
-      dot.classList.add('active');
-    });
-    container.appendChild(dot);
-  });
-}
-buildShadeRow(lipShadesEl, LIP_SHADES, (i) => activeLip = i, 0);
-buildShadeRow(eyeShadesEl, EYE_SHADES, (i) => activeEye = i, 0);
-
-document.querySelectorAll('.switch[data-key]').forEach(sw => {
-  const key = sw.dataset.key;
-  sw.classList.toggle('on', state[key]);
-  sw.classList.toggle('off', !state[key]);
-  sw.parentElement.addEventListener('click', () => {
-    state[key] = !state[key];
-    sw.classList.toggle('on', state[key]);
-    sw.classList.toggle('off', !state[key]);
-  });
-});
-
-function pathFrom(landmarks, indices, w, h) {
-  const pts = indices.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
-  const path = new Path2D();
-  path.moveTo(pts[0][0], pts[0][1]);
-  for (let i = 1; i < pts.length; i++) path.lineTo(pts[i][0], pts[i][1]);
-  path.closePath();
-  return path;
-}
-
-function avgPoint(landmarks, indices, w, h) {
-  let sx = 0, sy = 0;
-  indices.forEach(i => { sx += landmarks[i].x * w; sy += landmarks[i].y * h; });
-  return [sx / indices.length, sy / indices.length];
-}
-
-function drawFoundation(landmarks, w, h) {
-  blurCanvas.width = w; blurCanvas.height = h;
-  blurCtx.filter = 'blur(6px)';
-  blurCtx.drawImage(video, 0, 0, w, h);
-  blurCtx.filter = 'none';
-
-  ctx.save();
-  const facePath = pathFrom(landmarks, FACE_OVAL, w, h);
-  ctx.clip(facePath);
-  ctx.globalAlpha = 0.55;
-  ctx.drawImage(blurCanvas, 0, 0);
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = 'rgba(200,160,150,0.08)';
-  ctx.fill(facePath);
-  ctx.restore();
-}
-
-function drawEyeshadowBand(landmarks, arcIndices, browIndices, w, h, color) {
-  const eyeCenter = avgPoint(landmarks, arcIndices, w, h);
-  const browCenter = avgPoint(landmarks, browIndices, w, h);
-  const ux = browCenter[0] - eyeCenter[0];
-  const uy = browCenter[1] - eyeCenter[1];
-  const mag = Math.hypot(ux, uy) || 1;
-  const offset = mag * 0.55;
-  const nx = (ux / mag) * offset;
-  const ny = (uy / mag) * offset;
-
-  const inner = arcIndices.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
-  const outer = inner.map(p => [p[0] + nx, p[1] + ny]);
-
-  const path = new Path2D();
-  path.moveTo(inner[0][0], inner[0][1]);
-  for (let i = 1; i < inner.length; i++) path.lineTo(inner[i][0], inner[i][1]);
-  for (let i = outer.length - 1; i >= 0; i--) path.lineTo(outer[i][0], outer[i][1]);
-  path.closePath();
-
-  ctx.fillStyle = color;
-  ctx.fill(path);
-}
-
-function drawEyeliner(landmarks, arcIndices, w, h) {
-  const pts = arcIndices.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
-  ctx.beginPath();
-  ctx.moveTo(pts[0][0], pts[0][1]);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-  const last = pts[pts.length - 1];
-  const prev = pts[pts.length - 2];
-  const dx = last[0] - prev[0], dy = last[1] - prev[1];
-  ctx.lineTo(last[0] + dx * 1.8, last[1] + dy * 1.8);
-  ctx.strokeStyle = 'rgba(15,10,10,0.85)';
-  ctx.lineWidth = Math.max(2, w * 0.006);
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-  ctx.stroke();
-}
-
 function drawBrow(landmarks, indices, w, h) {
-  const path = pathFrom(landmarks, indices, w, h);
-  ctx.fillStyle = 'rgba(55,35,25,0.38)';
-  ctx.fill(path);
+  paintFeatheredLayer(w, h, (c) => {
+    const pts = indices.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
+    c.beginPath();
+    c.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
+    c.closePath();
+    c.fill();
+  }, 'rgba(50,32,22,1)', 'multiply', 0.4, 1.5);
 }
 
 function onResults(results) {
@@ -583,14 +426,18 @@ function onResults(results) {
 
     if (state.blush) {
       const radius = w * 0.045;
+      ctx.save();
+      ctx.globalCompositeOperation = 'multiply';
       [LEFT_CHEEK, RIGHT_CHEEK].forEach(idx => {
         const cx = landmarks[idx].x * w, cy = landmarks[idx].y * h;
         const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
-        grad.addColorStop(0, 'rgba(214,110,140,0.35)');
+        grad.addColorStop(0, 'rgba(214,110,140,0.55)');
+        grad.addColorStop(0.6, 'rgba(214,110,140,0.25)');
         grad.addColorStop(1, 'rgba(214,110,140,0)');
         ctx.fillStyle = grad;
         ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill();
       });
+      ctx.restore();
     }
 
     if (state.brow) {
@@ -599,9 +446,9 @@ function onResults(results) {
     }
 
     if (state.eyeshadow) {
-      const c = EYE_SHADES[activeEye].color;
-      drawEyeshadowBand(landmarks, LEFT_EYE_UPPER_ARC, LEFT_EYEBROW, w, h, c);
-      drawEyeshadowBand(landmarks, RIGHT_EYE_UPPER_ARC, RIGHT_EYEBROW, w, h, c);
+      const shade = EYE_SHADES[activeEye];
+      drawEyeshadowBand(landmarks, LEFT_EYE_UPPER_ARC, LEFT_EYEBROW, w, h, shade.color, shade.alpha);
+      drawEyeshadowBand(landmarks, RIGHT_EYE_UPPER_ARC, RIGHT_EYEBROW, w, h, shade.color, shade.alpha);
     }
 
     if (state.eyeliner) {
@@ -609,16 +456,57 @@ function onResults(results) {
       drawEyeliner(landmarks, RIGHT_EYE_UPPER_ARC, w, h);
     }
 
-    ctx.save();
-    const outer = pathFrom(landmarks, LIPS_OUTER, w, h);
-    const inner = pathFrom(landmarks, LIPS_INNER, w, h);
-    ctx.clip(outer);
-    ctx.fillStyle = LIP_SHADES[activeLip].color;
-    ctx.fill(outer);
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.fillStyle = 'rgba(0,0,0,1)';
-    ctx.fill(inner);
-    ctx.restore();
+    {
+      const shade = LIP_SHADES[activeLip];
+      const outerPts = LIPS_OUTER.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
+      const innerPts = LIPS_INNER.map(i => [landmarks[i].x * w, landmarks[i].y * h]);
+
+      // build a lip-only mask (outer minus inner) in the offscreen layer,
+      // feather it slightly so the color melts into the skin/vermillion
+      // border instead of sitting as a hard flat shape, then multiply-blend
+      // onto the frame so natural lip shading/texture still shows through.
+      layerCanvas.width = w; layerCanvas.height = h;
+      layerCtx.clearRect(0, 0, w, h);
+      layerCtx.filter = 'blur(1.5px)';
+      layerCtx.fillStyle = shade.color;
+      layerCtx.beginPath();
+      layerCtx.moveTo(outerPts[0][0], outerPts[0][1]);
+      for (let i = 1; i < outerPts.length; i++) layerCtx.lineTo(outerPts[i][0], outerPts[i][1]);
+      layerCtx.closePath();
+      layerCtx.moveTo(innerPts[0][0], innerPts[0][1]);
+      for (let i = 1; i < innerPts.length; i++) layerCtx.lineTo(innerPts[i][0], innerPts[i][1]);
+      layerCtx.closePath();
+      layerCtx.fill('evenodd');
+      layerCtx.filter = 'none';
+
+      ctx.save();
+      ctx.globalAlpha = shade.alpha;
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.drawImage(layerCanvas, 0, 0);
+      ctx.restore();
+
+      // subtle gloss highlight on the upper-center of the lower lip
+      const outer = pathFrom(landmarks, LIPS_OUTER, w, h);
+      const inner = pathFrom(landmarks, LIPS_INNER, w, h);
+      ctx.save();
+      ctx.clip(outer);
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fill(inner, 'evenodd');
+      ctx.restore();
+
+      const cx = (outerPts.reduce((s,p)=>s+p[0],0) / outerPts.length);
+      const cy = (outerPts.reduce((s,p)=>s+p[1],0) / outerPts.length);
+      const glossR = w * 0.05;
+      ctx.save();
+      ctx.clip(outer);
+      ctx.globalCompositeOperation = 'screen';
+      const gloss = ctx.createRadialGradient(cx, cy - glossR*0.3, 0, cx, cy - glossR*0.3, glossR);
+      gloss.addColorStop(0, `rgba(255,255,255,${shade.gloss})`);
+      gloss.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = gloss;
+      ctx.beginPath(); ctx.arc(cx, cy - glossR*0.3, glossR, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
 
   } else {
     statusText.textContent = 'No face detected';
@@ -664,15 +552,4 @@ async function startCamera() {
   }
 }
 
-startBtn.addEventListener('click', startCamera);
-
-snapBtn.addEventListener('click', () => {
-  const link = document.createElement('a');
-  link.download = 'makeup-tryon.png';
-  link.href = canvas.toDataURL('image/png');
-  link.click();
-});
-</script>
-</body>
-  </html>
-
+startBtn.addEventListener('click',
